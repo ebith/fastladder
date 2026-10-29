@@ -1,21 +1,49 @@
-version: '3'
 services:
   web:
     build:
       context: ./
     depends_on:
-      - db
-    ports: 
+      db:
+        condition: service_healthy
+    ports:
       - 5000:5000
     environment:
-      DATABASE_URL: mysql2://root@db/fastladder
-      PORT: "5000"
-      SECRET_KEY_BASE: PLEASE_CHANGE_ME
+      DATABASE_URL: postgresql://fastladder:${POSTGRES_PASSWORD}@db/fastladder
+      PORT: '5000'
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      RAILS_ENV: production
+      RACK_QUERY_PARSER_PARAMS_LIMIT: '10000'
+      TZ: Asia/Tokyo
     command: bash -c "./bin/rails db:create db:migrate && foreman start"
-    restart: always
+    restart: unless-stopped
+    # Traefik
+    networks:
+      - traefik
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.fastladder.entrypoints=websecure'
+      - 'traefik.http.routers.fastladder.tls=true'
+      - 'traefik.http.routers.fastladder.tls.certresolver=cloudflare'
+      - 'traefik.http.routers.fastladder.rule=Host(`fastladder.feelmy.net`)'
   db:
-    image: mysql:8
+    image: postgres:16-alpine3.23
     environment:
-      MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+      POSTGRES_USER: fastladder
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: fastladder
+      TZ: Asia/Tokyo
     volumes:
-      - ./mysqldata:/var/lib/mysql
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - traefik
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+networks:
+  traefik:
+    external: true
+volumes:
+  pgdata:
