@@ -58,6 +58,10 @@ module Fastladder
           result[:message] = "Error: #{e.message}"
           result[:error] = true
           break
+        rescue StandardError => e
+          result[:message] = "Error: #{e.message}"
+          result[:error] = true
+          break
         end
         @logger.info "HTTP status: [#{response.code}] #{feed.feedlink}"
         case response
@@ -65,7 +69,12 @@ module Fastladder
           break
         when Net::HTTPSuccess
           ret = update(feed, response)
-          result[:message] = "#{ret[:new_items]} new items, #{ret[:updated_items]} updated items"
+          if ret[:error]
+            result[:message] = ret[:error]
+            result[:error] = true
+          else
+            result[:message] = "#{ret[:new_items]} new items, #{ret[:updated_items]} updated items"
+          end
           break
         when Net::HTTPClientError, Net::HTTPServerError
           result[:message] = "Error: #{response.code} #{response.message}"
@@ -123,11 +132,6 @@ module Fastladder
         return true
       rescue Exception
         @logger.error %!Crawler error: #{$!.message}\n#{$!.backtrace.join("\n")}!
-      ensure
-        if @crawl_status
-          @crawl_status.status = CRAWL_OK
-          @crawl_status.save
-        end
       end
       false
     end
@@ -137,13 +141,23 @@ module Fastladder
       sleep @interval
       if feed = CrawlStatus.fetch_crawlable_feed
         @interval = 0
-        result = crawl(feed)
-        if result[:error]
-          @logger.info "error: #{result[:message]}"
-        else
-          @crawl_status = feed.crawl_status
-          @crawl_status.http_status = result[:response_code]
-          @logger.info "success: #{result[:message]}"
+        crawl_status = feed.crawl_status || feed.create_crawl_status
+        begin
+          result = crawl(feed)
+          crawl_status.http_status = result[:response_code]
+          feed_label = "[Feed##{feed.id}] #{feed.title.presence || '(No title)'} (#{feed.feedlink})"
+          if result[:error]
+            crawl_status.error_count = (crawl_status.error_count || 0) + 1
+            crawl_status.error_message = result[:message].to_s.truncate(255)
+            @logger.warn "error: #{feed_label}: #{result[:message]}"
+          else
+            crawl_status.error_count = 0
+            crawl_status.error_message = nil
+            @logger.info "success: #{feed_label}: #{result[:message]}"
+          end
+        ensure
+          crawl_status.status = CRAWL_OK
+          crawl_status.save
         end
       else
         @interval = @interval > 60 ? 60 : @interval + 1
@@ -156,7 +170,14 @@ module Fastladder
         updated_items: 0,
         error: nil
       }
-      unless parsed = Feedjira.parse(source.body)
+      begin
+        parsed = Feedjira.parse(source.body)
+      rescue StandardError => e
+        result[:error] = "Cannot parse feed: #{e.message}"
+        return result
+      end
+
+      unless parsed
         result[:error] = 'Cannot parse feed'
         return result
       end

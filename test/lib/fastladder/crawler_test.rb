@@ -199,4 +199,64 @@ class Fastladder::CrawlerTest < ActiveSupport::TestCase
       assert_equal 0, count
     end
   end
+
+  test "update returns error when source body cannot be parsed" do
+    source = Struct.new(:body).new("<!DOCTYPE html><html><body>404 Not Found</body></html>")
+    result = @crawler.send(:update, @feed, source)
+    assert result[:error]
+    assert_includes result[:error], "Cannot parse feed"
+  end
+
+  test "crawl handles unparseable response body as error" do
+    @feed.update!(feedlink: "http://example.com/feed.xml")
+    response = Net::HTTPOK.new("1.1", "200", "OK")
+    response.stub :body, "<!DOCTYPE html><html><body>Closed</body></html>" do
+      Fastladder.stub :fetch, response do
+        result = @crawler.crawl(@feed)
+        assert result[:error]
+        assert_includes result[:message], "Cannot parse feed"
+      end
+    end
+  end
+
+  test "crawl handles network errors gracefully as error" do
+    @feed.update!(feedlink: "http://example.com/feed.xml")
+    Fastladder.stub :fetch, ->(*args) { raise SocketError, "getaddrinfo: Name or service not known" } do
+      result = @crawler.crawl(@feed)
+      assert result[:error]
+      assert_includes result[:message], "Name or service not known"
+    end
+  end
+
+  test "run_body resets crawl_status to CRAWL_OK and records error_count on crawl error" do
+    crawl_status = FactoryBot.create(:crawl_status, status: Fastladder::Crawler::CRAWL_NOW, feed: @feed)
+    @feed.update!(crawl_status: crawl_status)
+
+    CrawlStatus.stub :fetch_crawlable_feed, @feed do
+      @crawler.stub :crawl, { error: true, message: "Connection refused", response_code: nil } do
+        @crawler.send(:run_body)
+      end
+    end
+
+    crawl_status.reload
+    assert_equal Fastladder::Crawler::CRAWL_OK, crawl_status.status
+    assert_equal 1, crawl_status.error_count
+    assert_equal "Connection refused", crawl_status.error_message
+  end
+
+  test "run_body resets error_count to 0 on successful crawl" do
+    crawl_status = FactoryBot.create(:crawl_status, status: Fastladder::Crawler::CRAWL_NOW, error_count: 3, error_message: "Old error", feed: @feed)
+    @feed.update!(crawl_status: crawl_status)
+
+    CrawlStatus.stub :fetch_crawlable_feed, @feed do
+      @crawler.stub :crawl, { error: false, message: "0 new items, 0 updated items", response_code: 200 } do
+        @crawler.send(:run_body)
+      end
+    end
+
+    crawl_status.reload
+    assert_equal Fastladder::Crawler::CRAWL_OK, crawl_status.status
+    assert_equal 0, crawl_status.error_count
+    assert_nil crawl_status.error_message
+  end
 end
